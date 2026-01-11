@@ -11,6 +11,22 @@ It captures the intersection of two constraints:
 
 The result is a dynamic "bead" shape that morphs as you travel.
 
+
+### Screenshots of the app in action
+
+![The start of the journey](screenshots/elapsed-1.png)
+
+The user places two points, and the time requirements, and clicks calculate. Then they click Play. 
+
+If the user placed more than two nodes, the time prisms for all will be calculated; however the animated pathing currently only travels to the last node. Next stage will support this feature as it is a requirement for the desired showcase project.
+
+Note: The time must be a logical restriction, impossible constraints will simply not render.
+Note the latency display for computation (this is a holdover for when I was debugging the poorly coded graph.reverse() issue)
+![Time passes and the Time Prism automatically updates](screenshots/elapsed-2.png)
+
+![The end of pour example journey](screenshots/elapsed-3.png)
+
+
 ### The Challenge
 The math is straightforward (Bidirectional Dijkstra), but making it run at 60 FPS for a moving simulation was... tricky.
 
