@@ -22,10 +22,14 @@ If the user placed more than two nodes, the time prisms for all will be calculat
 
 Note: The time must be a logical restriction, impossible constraints will simply not render.
 Note the latency display for computation (this is a holdover for when I was debugging the poorly coded graph.reverse() issue)
+
 ![Time passes and the Time Prism automatically updates](screenshots/elapsed-2.png)
+
 Time passes and the Time Prism automatically updates
+
 ![The end of pour example journey](screenshots/elapsed-3.png)
-The end of pour example journey
+
+The end of our example journey
 
 
 ### The Challenge
