@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Ensure map container takes full space */
+body, html, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
