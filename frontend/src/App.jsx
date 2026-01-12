@@ -1,9 +1,13 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Map, { Source, Layer, NavigationControl } from 'react-map-gl/maplibre';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
+import { api } from './services/api'; 
+import { enrichPointsWithMetadata } from './utils/pointUtils';
 import PrismControls from './components/PrismControls';
+import PrivacyControls from './components/PrivacyControls';
+import MetricsPanel from './components/MetricsPanel'; // NEW
 import { prismLayer, pointLayer } from './config/mapLayers';
 import SimulationControls from './components/SimulationControls';
 
@@ -13,128 +17,238 @@ const INITIAL_VIEW_STATE = {
   zoom: 12
 };
 
-const API_URL = "http://localhost:8000";
-
 function App() {
   const mapRef = useRef();
   
-  // State
-  const [mode, setMode] = useState(null); // 'add' or null
-  const [points, setPoints] = useState([]); // Array of { id, lat, lng, nodeId, timeStr }
-  const [prismData, setPrismData] = useState(null);
+  // App State
+  const [mode, setMode] = useState(null); 
+  const [points, setPoints] = useState([]); 
+  
+  // Prism State
+  const [currentPrismData, setCurrentPrismData] = useState(null); 
+  const [baselinePrismData, setBaselinePrismData] = useState(null);
+  const [alprPrismData, setAlprPrismData] = useState(null);
+  
+  // Metrics State (NEW)
+  const [metricsHistory, setMetricsHistory] = useState([]); // For chart
+  
+  // Privacy State
+  const [showCameras, setShowCameras] = useState(true);
+  const [hasRunSimulation, setHasRunSimulation] = useState(false);
+  const [privacyMode, setPrivacyMode] = useState('alpr');
 
-  // Handle Map Clicks
+  const [cameraGeoJSON, setCameraGeoJSON] = useState(null);
+  const [cameraNodeSet, setCameraNodeSet] = useState(new Set());
+
+  useEffect(() => {
+      api.getCameras()
+        .then(data => {
+            setCameraGeoJSON(data);
+            const ids = new Set(data.features.map(f => f.properties.node_id));
+            setCameraNodeSet(ids);
+        })
+        .catch(err => console.error("Failed to load cameras", err));
+  }, []);
+
+  useEffect(() => {
+      if (!hasRunSimulation) return;
+
+      if (privacyMode === 'baseline' && baselinePrismData) {
+          setCurrentPrismData(baselinePrismData);
+      } else if (privacyMode === 'alpr' && alprPrismData) {
+          setCurrentPrismData(alprPrismData);
+      }
+  }, [privacyMode, hasRunSimulation, baselinePrismData, alprPrismData]);
+
   const handleMapClick = async (event) => {
     if (mode !== 'add') return;
-
     const lng = event.lngLat.lng !== undefined ? event.lngLat.lng : event.lngLat[0];
     const lat = event.lngLat.lat !== undefined ? event.lngLat.lat : event.lngLat[1];
 
     try {
-      const response = await fetch(`${API_URL}/nearest-node?lat=${lat}&lng=${lng}`);
-      const data = await response.json();
+      const data = await api.getNearestNode(lat, lng);
       
-      // Default time: Current time or last point's time + 15 mins
       let defaultTime = "10:00";
       if (points.length > 0) {
-         // simplistic increment logic could go here, but "10:00" is fine as placeholder
-         defaultTime = points[points.length-1].timeStr; 
+         const lastPoint = points[points.length-1];
+         
+         // 1. Get precise route duration from Backend
+         const routeData = await api.getRoute(lastPoint.nodeId, data.node_id);
+         const travelTimeSeconds = routeData.duration_s || 0;
+         
+         // 2. Add to previous time
+         const [h, m] = lastPoint.timeStr.split(':').map(Number);
+         const lastSeconds = h * 3600 + m * 60;
+         
+         // Note: We add a small 2-minute "Human Buffer" so the prism isn't a 0-width line.
+         // Without this, "Uncertainty" is 0 because you are exactly on schedule.
+         const newTotalSeconds = lastSeconds + travelTimeSeconds + 120; 
+
+         const newH = Math.floor(newTotalSeconds / 3600) % 24;
+         const newM = Math.floor((newTotalSeconds % 3600) / 60);
+         
+         defaultTime = `${String(newH).padStart(2,'0')}:${String(newM).padStart(2,'0')}`;
       }
 
       const newPoint = {
-          id: Date.now(), // Unique ID
-          lat,
-          lng,
-          nodeId: data.node_id,
-          timeStr: defaultTime
+          id: Date.now(), lat, lng, nodeId: data.node_id, timeStr: defaultTime, type: 'user' 
       };
-
       setPoints(prev => [...prev, newPoint]);
-      // Note: We stay in 'add' mode so user can keep clicking
+      
+      setHasRunSimulation(false);
+      setBaselinePrismData(null);
+      setAlprPrismData(null);
+      setMetricsHistory([]); // Reset chart
+
     } catch (error) {
       console.error("Failed to fetch node:", error);
     }
   };
 
-  // Helper: Convert "10:30" to relative seconds from the first point
   const getSecondsFromTimeStr = (timeStr) => {
+      if (!timeStr) return 0;
       const [h, m] = timeStr.split(':').map(Number);
       return h * 3600 + m * 60;
   };
 
   const runAnalysis = async (overridePoints) => {
-    // 1. Determine which points to use
-    // If 'overridePoints' is an array, it came from the Simulation Loop (Real-time).
-    // If it's a Click Event (or undefined), use the React State 'points' (Manual Mode).
-    const pointsToUse = Array.isArray(overridePoints) ? overridePoints : points;
+    if (!Array.isArray(overridePoints)) setCurrentPrismData(null);
 
-    if (pointsToUse.length < 2) return;
+    const activePoints = Array.isArray(overridePoints) ? overridePoints : points;
+    if (activePoints.length < 2) return;
 
-    // 2. Sort points by time (Logic remains the same)
-    const sortedPoints = [...pointsToUse].sort((a, b) => 
-        getSecondsFromTimeStr(a.timeStr) - getSecondsFromTimeStr(b.timeStr)
-    );
+    let payloadPoints = activePoints;
+    if (!Array.isArray(overridePoints)) {
+        payloadPoints = [...activePoints].sort((a, b) => 
+            getSecondsFromTimeStr(a.timeStr) - getSecondsFromTimeStr(b.timeStr)
+        );
+    }
 
-    const payload = sortedPoints.map(p => ({
+    const payload = payloadPoints.map(p => ({
         node_id: p.nodeId,
         time: getSecondsFromTimeStr(p.timeStr)
     }));
 
     try {
-      const response = await fetch(`${API_URL}/analyze/chain`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ points: payload })
-      });
-
-      const data = await response.json();
-      setPrismData(data);
+      const data = await api.getPrism(payload);
+      if ((!data.features || data.features.length === 0) && !Array.isArray(overridePoints)) {
+          alert("No prism found! Time budget too tight.");
+      }
+      setCurrentPrismData(data);
     } catch (error) {
       console.error("Analysis failed:", error);
-      // IMPORTANT: Comment out alert to avoid infinite popups if the simulation crashes
-      // alert("Analysis failed. Check backend logs.");
     }
   };
 
   const handleReset = () => {
     setPoints([]);
-    setPrismData(null);
+    setCurrentPrismData(null);
     setMode(null);
+    setHasRunSimulation(false);
+    setMetricsHistory([]);
   };
 
-  // Convert points to GeoJSON for display
   const pointsGeoJSON = useMemo(() => {
+    const enriched = enrichPointsWithMetadata(points);
     return {
         type: 'FeatureCollection',
-        features: points.map((p, i) => ({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
-            properties: { 
-                index: i + 1,
-                time: p.timeStr,
-                type: i === 0 ? 'start' : (i === points.length - 1 ? 'end' : 'mid') 
-            }
-        }))
+        features: enriched.map((p) => {
+            const { type, label } = p.meta;
+            if (type === 'alpr' && privacyMode === 'baseline' && hasRunSimulation) return null; 
+            return {
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+                properties: { time: p.timeStr, type: type, label: label }
+            };
+        }).filter(Boolean)
     };
-  }, [points]);
+  }, [points, privacyMode, hasRunSimulation]);
+
+  const dynamicPointLayer = {
+      ...pointLayer,
+      id: 'points-layer',
+      paint: {
+          ...pointLayer.paint,
+          'circle-color': [
+              'match', ['get', 'type'],
+              'ghost', '#FBBF24', 'alpr', '#DC2626', 'start', '#10B981', 'end', '#EF4444', '#3B82F6'
+          ],
+          'circle-radius': [
+              'match', ['get', 'type'],
+              'ghost', 8, 'alpr', 5, 6
+          ]
+      }
+  };
+
+  const labelLayer = {
+      id: 'point-labels',
+      type: 'symbol',
+      layout: {
+          'text-field': ['get', 'label'],
+          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-size': 12,
+          'text-offset': [0, 1.5],
+          'text-anchor': 'top',
+          'text-allow-overlap': false
+      },
+      paint: { 'text-color': '#334155', 'text-halo-color': '#ffffff', 'text-halo-width': 2 }
+  };
+
+  const cameraLayer = {
+    id: 'camera-layer',
+    type: 'circle',
+    paint: { 'circle-radius': 4, 'circle-color': '#991b1b', 'circle-opacity': 0.2, 'circle-stroke-width': 0 }
+  };
 
   return (
-    <div style={{ width: '100vw', height: '100vh' }}>
+    <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
       
-      <PrismControls 
-        points={points}
-        setPoints={setPoints}
-        mode={mode}
-        setMode={setMode}
-        onAnalyze={runAnalysis}
-        onReset={handleReset}
-      />
-      <SimulationControls 
-        points={points}
-        setPoints={setPoints}
-        onAnalyze={runAnalysis}
-        apiUrl={API_URL}
-      />
+      {/* LEFT PANEL */}
+      <div className="absolute top-4 left-4 z-10 pointer-events-none">
+          <PrismControls 
+            points={points}
+            setPoints={setPoints}
+            mode={mode}
+            setMode={setMode}
+            onAnalyze={runAnalysis}
+            onReset={handleReset}
+          />
+      </div>
+
+      {/* RIGHT PANEL */}
+      <div className="absolute top-4 right-4 z-10 flex flex-col gap-3 pointer-events-none">
+          
+          <SimulationControls 
+            points={points}
+            setPoints={setPoints}
+            setCurrentPrismData={setCurrentPrismData}
+            setBaselinePrismData={setBaselinePrismData}
+            setAlprPrismData={setAlprPrismData}
+            setHasRunSimulation={setHasRunSimulation}
+            setPrivacyMode={setPrivacyMode}
+            setMetricsHistory={setMetricsHistory} // Pass this setter
+            onAnalyze={runAnalysis}
+            cameraNodeSet={cameraNodeSet}
+          />
+          
+          <PrivacyControls 
+            showCameras={showCameras}
+            setShowCameras={setShowCameras}
+            hasRunSimulation={hasRunSimulation}
+            privacyMode={privacyMode}
+            setPrivacyMode={setPrivacyMode}
+          />
+
+          {/* NEW METRICS PANEL */}
+          <MetricsPanel 
+             baselineStats={baselinePrismData}
+             alprStats={alprPrismData}
+             privacyMode={privacyMode}
+             history={metricsHistory}
+          />
+
+      </div>
+
       <Map
         ref={mapRef}
         initialViewState={INITIAL_VIEW_STATE}
@@ -144,19 +258,24 @@ function App() {
         onClick={handleMapClick}
         cursor={mode === 'add' ? 'crosshair' : 'grab'}
       >
-        <NavigationControl position="top-right" />
+        <NavigationControl position="top-right" style={{marginTop: '350px'}} />
 
-        {/* Prism Layer */}
-        {prismData && (
-          <Source id="prism-data" type="geojson" data={prismData}>
-            <Layer {...prismLayer} beforeId="selected-points" />
-          </Source>
+        {showCameras && cameraGeoJSON && (
+            <Source id="camera-data" type="geojson" data={cameraGeoJSON}>
+                <Layer {...cameraLayer} />
+            </Source>
         )}
 
-        {/* Points Layer */}
         <Source id="points-data" type="geojson" data={pointsGeoJSON}>
-          <Layer {...pointLayer} />
+          <Layer {...dynamicPointLayer} />
+          <Layer {...labelLayer} />
         </Source>
+
+        {currentPrismData && (
+          <Source id="prism-data" type="geojson" data={currentPrismData}>
+            <Layer {...prismLayer} beforeId="points-layer" />
+          </Source>
+        )}
 
       </Map>
     </div>

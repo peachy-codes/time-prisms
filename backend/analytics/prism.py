@@ -1,61 +1,49 @@
 import networkx as nx
+import json
 
-def calculate_single_prism(G, G_rev, start_node, end_node, real_budget_seconds, detour_ratio=1.3):
+def calculate_single_prism(G, G_REV, start_node, end_node, real_budget_seconds, detour_ratio=1.3, include_metrics=False):
     """
-    Calculates the prism but clamps the max travel time to prevent 'overshoot'.
-    
-    real_budget_seconds: The actual time difference (e.g., 20 mins).
-    detour_ratio: 1.3 means we only visualize paths up to 30% longer than 
-                  optimal, even if the budget allows for more.
+    Calculates a single leg of the Space-Time Prism.
+    Returns: (list of features, float total_length_meters)
     """
     
-    # 1. Calculate Minimum Theoretical Time (Shortest Path)
+    # 1. Physics Check: Can we make it?
     try:
         min_time = nx.shortest_path_length(G, start_node, end_node, weight='travel_time')
     except nx.NetworkXNoPath:
-        return None
+        return [], 0.0
 
-    # 2. Validation
-    # If the user physically couldn't make it in time, return nothing.
     if real_budget_seconds < min_time:
-        return None
+        return [], 0.0
 
-    # 3. Determine the "Visual" Cutoff
-    # We use the SMALLER of:
-    #   a) The actual time budget (the hard physics limit)
-    #   b) The "Reasonable Driver" limit (shortest path * ratio)
-    
-    # This prevents the "spiky ball" effect where a driver drives 5 miles 
-    # past the destination just to burn time.
+    # 2. Logic: Restrict the 'Lens' to avoid the "Entire City" problem
     capped_budget = min_time * detour_ratio
     effective_cutoff = min(real_budget_seconds, capped_budget)
 
-    # 4. Forward Search (From Start)
+    # 3. Graph Search (Forward & Backward)
     dists_from_start = nx.single_source_dijkstra_path_length(
         G, start_node, cutoff=effective_cutoff, weight='travel_time'
     )
-    
-    # 5. Backward Search (To End) - Use Reversed Graph
     dists_to_end = nx.single_source_dijkstra_path_length(
-        G_rev, end_node, cutoff=effective_cutoff, weight='travel_time'
+        G_REV, end_node, cutoff=effective_cutoff, weight='travel_time'
     )
 
-    # ... (After Step 5: Backward Search) ...
-
     features = []
-    
-    # OPTIMIZATION: Intersection of sets
-    # Find nodes that are reachable from Start AND can reach End
-    # This is much faster than iterating all edges
+    leg_total_length = 0.0
+
+    # 4. Intersection & Construction
+    # We find nodes reachable from Start AND capable of reaching End
     reachable_nodes = set(dists_from_start.keys()) & set(dists_to_end.keys())
     
-    # iterate ONLY over the valid nodes to find connecting edges
     for u in reachable_nodes:
-        # Check all outgoing edges from this valid node
-        # G[u] gives neighbors of u
-        for v, data in G[u].items():
-            # We only care if the destination node v is also reachable by the end
+        # Check outgoing edges from valid nodes
+        for v, edge_atlas in G[u].items():
             if v in dists_to_end:
+                if 0 in edge_atlas:
+                    data = edge_atlas[0]
+                else:
+                    data = next(iter(edge_atlas.values()))
+
                 t_start = dists_from_start[u]
                 t_edge = data.get('travel_time', 0)
                 t_end = dists_to_end[v]
@@ -63,63 +51,74 @@ def calculate_single_prism(G, G_rev, start_node, end_node, real_budget_seconds, 
                 total_trip_time = t_start + t_edge + t_end
                 
                 if total_trip_time <= effective_cutoff:
-                    # ... (Your existing scoring and geometry logic) ...
-                    # COPY YOUR EXISTING LOGIC HERE
-                    
+                    # Metric Calculation (Done here, inside the loop)
+                    print(f"Edge found! Metrics Requested: {include_metrics}")
+                    if include_metrics:
+                        edge_len = data.get('length', 0)
+
+                        leg_total_length += edge_len
+                        print(f"Adding edge length: {edge_len}")
+
+                    # Score Calculation
                     if effective_cutoff == min_time:
-                        score = 0
+                        score = 0.0
                     else:
                         score = (total_trip_time - min_time) / (effective_cutoff - min_time)
+                        score = max(0.0, min(1.0, score))
 
-                    geom = data.get('geometry', None)
-                    if geom:
-                        geojson_geom = geom.__geo_interface__
+                    # Geometry
+                    if 'geometry' in data:
+                        coords = list(data['geometry'].coords)
                     else:
-                        geojson_geom = {
-                            "type": "LineString",
-                            "coordinates": [
-                                [G.nodes[u]['x'], G.nodes[u]['y']], 
-                                [G.nodes[v]['x'], G.nodes[v]['y']]
-                            ]
-                        }
+                        n1 = G.nodes[u]
+                        n2 = G.nodes[v]
+                        coords = [(n1['x'], n1['y']), (n2['x'], n2['y'])]
 
                     features.append({
                         "type": "Feature",
-                        "geometry": geojson_geom,
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": coords
+                        },
                         "properties": {
                             "score": score,
                             "time_cost": total_trip_time
                         }
                     })
 
-    return features
+    
+    return features, leg_total_length
 
-def calculate_prism_chain(G, G_rev, nodes, times):
+
+def calculate_prism_chain(G, G_REV, nodes, times, include_metrics=False):
     """
-    Iterates through a list of nodes/times and unions the prisms.
+    Iterates through the chain and sums up the length returned by single_prism.
     """
     all_features = []
+    total_chain_length = 0.0
     
     for i in range(len(nodes) - 1):
-        u = nodes[i]
-        v = nodes[i+1]
-        t_u = times[i]
-        t_v = times[i+1]
+        u, v = nodes[i], nodes[i+1]
+        t_start, t_end = times[i], times[i+1]
         
-        budget = t_v - t_u
-        
-        if budget <= 0:
-            continue 
+        real_budget = t_end - t_start
+        if real_budget <= 0:
+            continue
             
-        #print(f"Leg {i}: {budget}s available. Computing...")
+        # Call helper
+        leg_features, leg_length = calculate_single_prism(
+            G, G_REV, u, v, real_budget, 
+            detour_ratio=1.3, 
+            include_metrics=include_metrics
+        )
         
-        # We use the single prism logic with the detour clamp
-        leg_features = calculate_single_prism(G, G_rev, u, v, budget, detour_ratio=1.3)
-        
-        if leg_features:
-            all_features.extend(leg_features)
-            
+        all_features.extend(leg_features)
+        total_chain_length += leg_length
+    print(f"Chain Calc Complete. Total Length: {total_chain_length} meters. Metrics: {include_metrics}")
     return {
         "type": "FeatureCollection",
-        "features": all_features
+        "features": all_features,
+        "properties": {
+            "total_length_km": round(total_chain_length / 1000.0, 3)
+        }
     }

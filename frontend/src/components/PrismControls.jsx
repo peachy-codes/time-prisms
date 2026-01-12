@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { enrichPointsWithMetadata } from '../utils/pointUtils';
 
 const PrismControls = ({ 
     points, 
@@ -9,24 +10,21 @@ const PrismControls = ({
     onReset 
 }) => {
 
-    // Helper: Update time for specific point index
     const updateTime = (index, newTimeStr) => {
-        const newPoints = [...points];
-        newPoints[index].timeStr = newTimeStr;
-        setPoints(newPoints);
+        setPoints(prev => prev.map((p, i) => i === index ? { ...p, timeStr: newTimeStr } : p));
     };
 
-    // Helper: Remove a point
     const removePoint = (index) => {
-        const newPoints = points.filter((_, i) => i !== index);
-        setPoints(newPoints);
+        setPoints(prev => prev.filter((_, i) => i !== index));
     };
+
+    // Use our new utility to get labels and colors
+    const enrichedPoints = useMemo(() => enrichPointsWithMetadata(points), [points]);
 
     return (
-        <div className="absolute top-4 left-4 bg-white p-5 rounded-lg shadow-xl w-80 z-10 font-sans max-h-[90vh] overflow-y-auto">
+        <div className="bg-white p-5 rounded-lg shadow-xl w-80 font-sans max-h-[90vh] overflow-y-auto pointer-events-auto">
             <h2 className="text-xl font-bold mb-4 border-b pb-2">Space-Time Path</h2>
             
-            {/* Add Button */}
             <button 
                 onClick={() => setMode(mode === 'add' ? null : 'add')}
                 className={`w-full py-3 mb-4 rounded font-bold border-2 border-dashed transition-all ${
@@ -38,45 +36,54 @@ const PrismControls = ({
                 {mode === 'add' ? "Click Map to Place Point..." : "+ Add Detection Point"}
             </button>
 
-            {/* Point List */}
             <div className="flex flex-col gap-3 mb-6">
-                {points.length === 0 && (
+                {enrichedPoints.length === 0 && (
                     <div className="text-center text-slate-400 italic text-sm py-2">
                         No points added yet.
                     </div>
                 )}
 
-                {points.map((p, i) => (
-                    <div key={p.id} className="bg-slate-50 p-3 rounded border border-slate-200 relative group">
-                        <div className="flex justify-between items-center mb-2">
-                            <span className="font-bold text-sm text-slate-700">
-                                Point {i + 1}
-                            </span>
-                            <button 
-                                onClick={() => removePoint(i)}
-                                className="text-slate-400 hover:text-red-500 text-xs px-2"
-                            >
-                                ✕
-                            </button>
+                {enrichedPoints.map((p, i) => {
+                    if (p.isGhost) return null;
+                    
+                    const { label, style, type } = p.meta;
+
+                    return (
+                        <div key={p.id} className={`bg-slate-50 p-3 rounded border relative group ${style.twBorder}`}>
+                            <div className="flex justify-between items-center mb-2">
+                                {/* Theme-based Badge */}
+                                <span className={`text-xs font-bold px-2 py-1 rounded ${style.twBadge}`}>
+                                    {label}
+                                </span>
+                                
+                                {type !== 'alpr' && (
+                                    <button 
+                                        onClick={() => removePoint(i)}
+                                        className="text-slate-400 hover:text-red-500 text-xs px-2"
+                                    >
+                                        ✕
+                                    </button>
+                                )}
+                            </div>
+                            
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs font-semibold text-slate-500">TIME:</label>
+                                <input 
+                                    type="time" 
+                                    value={p.timeStr}
+                                    onChange={(e) => updateTime(i, e.target.value)}
+                                    disabled={type === 'alpr'}
+                                    className={`flex-1 p-1 border rounded text-sm ${type === 'alpr' ? 'bg-slate-200 cursor-not-allowed text-slate-500' : 'cursor-pointer'}`}
+                                />
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-1 truncate">
+                                {p.lat.toFixed(5)}, {p.lng.toFixed(5)}
+                            </div>
                         </div>
-                        
-                        <div className="flex items-center gap-2">
-                            <label className="text-xs font-semibold text-slate-500">TIME:</label>
-                            <input 
-                                type="time" 
-                                value={p.timeStr}
-                                onChange={(e) => updateTime(i, e.target.value)}
-                                className="flex-1 p-1 border rounded text-sm"
-                            />
-                        </div>
-                        <div className="text-[10px] text-slate-400 mt-1 truncate">
-                            {p.lat.toFixed(5)}, {p.lng.toFixed(5)}
-                        </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
 
-            {/* Actions */}
             <div className="flex flex-col gap-2">
                 <button 
                     onClick={onAnalyze}

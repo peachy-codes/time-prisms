@@ -1,3 +1,5 @@
+import { POINT_STYLES, POINT_TYPES } from './theme';
+
 export const prismLayer = {
     id: 'prism-edges',
     type: 'line',
@@ -7,11 +9,18 @@ export const prismLayer = {
             'interpolate',
             ['linear'],
             ['get', 'score'],
-            0.0, '#00ff00',  // Green (Optimal)
-            0.5, '#ffff00',  // Yellow
-            1.0, '#ff0000'   // Red (Boundary)
+            0.0, '#00ff00',  
+            0.5, '#ffff00',  
+            1.0, '#ff0000'   
         ],
-        'line-opacity': 0.5
+        'line-opacity': [
+            'interpolate',
+            ['linear'],
+            ['get', 'score'],
+            0.0, 0.9, 
+            0.5, 0.6,
+            1.0, 0.1 
+        ]
     }
 };
 
@@ -19,15 +28,24 @@ export const pointLayer = {
     id: 'selected-points',
     type: 'circle',
     paint: {
-        'circle-radius': 4,
+        // Look up the 'meta.type' property we added in pointUtils
         'circle-color': [
             'match',
+            ['get', 'type'], // We will pass the calculated type into the GeoJSON properties
+            POINT_TYPES.START, POINT_STYLES[POINT_TYPES.START].colorHex,
+            POINT_TYPES.END, POINT_STYLES[POINT_TYPES.END].colorHex,
+            POINT_TYPES.ALPR, POINT_STYLES[POINT_TYPES.ALPR].colorHex,
+            POINT_TYPES.GHOST, POINT_STYLES[POINT_TYPES.GHOST].colorHex,
+            POINT_STYLES[POINT_TYPES.WAYPOINT].colorHex // Default
+        ],
+        'circle-radius': [
+            'match',
             ['get', 'type'],
-            'start', '#00ff00',
-            'end', '#ff0000',
-            '#000000'
+            POINT_TYPES.GHOST, POINT_STYLES[POINT_TYPES.GHOST].radius,
+            POINT_TYPES.ALPR, POINT_STYLES[POINT_TYPES.ALPR].radius,
+            6 // Default
         ],
         'circle-stroke-width': 2,
-        'circle-stroke-color': '#000000ff'
+        'circle-stroke-color': '#ffffff'
     }
 };
